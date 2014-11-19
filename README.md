@@ -8,7 +8,6 @@ Installation
 Download the install.sh script, and the patch file (plugin.patch).
 Add execute permission to the script: chmod +x install.sh
 Review the configuration in /etc/one/sunstone-server.conf file.
-
 Configuration
 ========================
 :shib_logoutpage: /Shibboleth.sso/Logout  --The Shibboleth logout URL
