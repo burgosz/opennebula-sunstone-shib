@@ -1,0 +1,548 @@
+diff -ruN patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb one/ruby/cloud/CloudAuth/ShibCloudAuth.rb
+--- patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb	2014-11-19 10:08:37.009603691 +0100
++++ one/ruby/cloud/CloudAuth/ShibCloudAuth.rb	1970-01-01 01:00:00.000000000 +0100
+@@ -1,93 +0,0 @@
+-# -------------------------------------------------------------------------- #
+-# Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        #
+-#                                                                            #
+-# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+-# not use this file except in compliance with the License. You may obtain    #
+-# a copy of the License at                                                   #
+-#                                                                            #
+-# http://www.apache.org/licenses/LICENSE-2.0                                 #
+-#                                                                            #
+-# Unless required by applicable law or agreed to in writing, software        #
+-# distributed under the License is distributed on an "AS IS" BASIS,          #
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+-# See the License for the specific language governing permissions and        #
+-# limitations under the License.                                             #
+-#--------------------------------------------------------------------------- #
+-
+-DIR=File.dirname(__FILE__)
+-$: << DIR
+-
+-require 'shib_helper.rb'
+-require 'xmlrpc/client'
+-require 'rubygems'
+-require 'nokogiri'
+-
+-# @mainpage  Shibboleth Cloud Auth module for OpenNebula Sunstone
+-#
+-# @section desc Description
+-# This is a new authentication module for OpenNebula Sunstone.
+-# Shib Cloud Auth module is useful, when a SingleSignOn login is needed, where the Service Provider realised with a Shibboleth SP.
+-# In this case, login handled by Shibboleth and so the Sunstone 
+-# auth module (this one) controls the authorization of the users. \n
+-# If a new user wants to login, this module creates a new account for the user. The user's primary group and his secondary groups also created from the entitlements that come to Shibboleth in a SAML message.
+-# 
+-# @section conf Configuration
+-# Configuration file is at the end of the main Sunstone configuration file (sunstone-server.conf).
+-# Some configuration option is selfdescriptive (like :shib_host, :shib_logoutpage, :one_auth_for_shib). The rest of the options modify the behaviour of this authentication module.
+-# First an Apache HTTP VirtualHost location have to be created, a possible example can be see here:
+-# <Location /one>
+-#        # shibboleth shield 
+-#        AllowOverride all 
+-#        Order allow,deny 
+-#        Allow from all 
+-#        AuthType shibboleth
+-#        require valid-user
+-#        ShibUseHeaders On
+-#        ShibRequireSession On
+-# </Location>
+-#
+-# When OpenNebula authorizes a user this module uses some Apache HTTP header variable, where the SAML message datas are stored. After a successful authentication from the Apache HTTP header variables this module can read the actual user's datas.
+-# Example:
+-# :shib_username: HTTP_EPPN
+-# :shib_entitlement: HTTP_ENTITLEMENT
+-# :shib_entitlement_priority:
+-#    - admin
+-#    - alpha
+-#    - bravo
+-#
+-# In the example above the name of the user are stored in the HTTP_EPPN header variable, and the entitlements / privileges are stored in the HTTP_ENTITLEMENT header variable. The primary group of the user is calculated from the shib_entitlement_priority list, where the first existing groupname will be his primary group.
+-
+-module ShibCloudAuth
+-    def do_auth(env, params={})
+-        auth = Rack::Auth::Basic::Request.new(env)
+-
+-        if auth.provided? && auth.basic?
+-            @logger.info{"shib helper"}
+-            # create helper
+-            shib = Shib_Helper.new(@conf, @logger)
+-            
+-            # get username from session
+-            username = params['shib_username']
+-
+-            # if new user wants to login then create it
+-            userid = shib.get_userid(username).to_i
+-            if userid == 0
+-                userid = shib.create_user(username).to_i
+-            end
+-
+-            if !params['shib_entitlement'].empty?
+-                # get groupnames from entitlement
+-				groupnames = shib.get_groups(params['shib_entitlement'])
+-                # add user to given groups remove him from the old groups
+-                shib.handle_groups(userid, groupnames)
+-            else
+-                # if new user does not have any entitlement then refuse to login
+-                return nil
+-            end            
+-
+-            return username
+-        end
+-
+-        return nil
+-    end
+-end
+diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shib_helper.rb
+--- patch/ruby/cloud/CloudAuth/shib_helper.rb	2014-11-19 10:08:37.061604271 +0100
++++ one/ruby/cloud/CloudAuth/shib_helper.rb	1970-01-01 01:00:00.000000000 +0100
+@@ -1,150 +0,0 @@
+-# -------------------------------------------------------------------------- #
+-# Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        #
+-#                                                                            #
+-# Licensed under the Apache License, Version 2.0 (the "License"); you may    #
+-# not use this file except in compliance with the License. You may obtain    #
+-# a copy of the License at                                                   #
+-#                                                                            #
+-# http://www.apache.org/licenses/LICENSE-2.0                                 #
+-#                                                                            #
+-# Unless required by applicable law or agreed to in writing, software        #
+-# distributed under the License is distributed on an "AS IS" BASIS,          #
+-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   #
+-# See the License for the specific language governing permissions and        #
+-# limitations under the License.                                             #
+-#--------------------------------------------------------------------------- #
+-
+-# Helper class to call methods in ShibCloudAuth module
+-class Shib_Helper
+-
+-    # initalize some instance variable
+-    def initialize(config, logger)
+-        @config = config
+-        @logger = logger
+-        
+-        one_xmlrpc = @config[:one_xmlrpc]
+-
+-        @server = XMLRPC::Client.new2(one_xmlrpc)
+-        @session_string = @config[:one_auth_username] + ':' + @config[:one_auth_passwd]
+-    end 
+-
+-    # creating new user
+-    # @param username username of user to be created
+-    def create_user(username)
+-        call_xmlrpc('one.user.allocate', 'SAML module error! Can not create new user!', username, generate_password, '')[1]
+-    end
+-
+-    # create groups if they do not exists
+-    # @param groupnames groupnames to be created
+-    def create_groups(groupnames)
+-        groupnames.map {|groupname|
+-            if get_groupid(groupname).empty?
+-                call_xmlrpc('one.group.allocate', 'SAML module error! Can not create new group!', groupname)
+-            end
+-        }
+-    end
+-
+-    # get user's ID
+-    # @param username username
+-    # @return user's ID
+-    def get_userid(username)
+-        response = call_xmlrpc('one.userpool.info', 'SAML module error! Can not get userpool info!')
+-        xml = Nokogiri::XML(response[1])
+-        return xml.xpath('//USER[NAME=\'' + username + '\']/ID').inner_text
+-    end
+-
+-    # get group ID of a group
+-    # @param groupname groupname
+-    # @return group's ID
+-    def get_groupid(groupname)
+-        response = call_xmlrpc('one.grouppool.info', 'SAML module error! Can not get users group id!')
+-        xml = Nokogiri::XML(response[1])
+-        return xml.xpath('//GROUP[NAME=\'' + groupname + '\']/ID').inner_text
+-    end
+-
+-    # handle user's group
+-    # @param userid user's ID
+-    # @param groupnames groupnames in which the user belongs
+-    def handle_groups(userid, groupnames)
+-        create_groups(groupnames)
+-        new_groupids = groupnames.map {|groupname| get_groupid(groupname).to_i}
+-        preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference).to_i}
+-
+-        # make the first valid group from the preference list primary group of the user
+-        primary_groupid = (preference_listids & new_groupids).shift
+-        if primary_groupid.nil?
+-            primary_groupid = new_groupids.shift
+-        end
+-        new_groupids.delete(primary_groupid)
+-        call_xmlrpc('one.user.chgrp', 'SAML module error! Can not set users primary group!', userid, primary_groupid)
+-        
+-        userinfo = call_xmlrpc('one.user.info', 'SAML module error! Can not get user info!', userid)[1]
+-        xml = Nokogiri::XML(userinfo)
+-        old_groupids = xml.xpath('//GROUPS/ID').map {|x| x.inner_text.to_i}
+-
+-        # collect the secondary groups from the user have to be removed or added
+-        groups_to_remove = (old_groupids - new_groupids)
+-        groups_to_add = (new_groupids - old_groupids)
+-
+-        # add user to the new secondary groups
+-        if !groups_to_add.empty?
+-            groups_to_add.map {|new_groupid|
+-                call_xmlrpc('one.user.addgroup', 'SAML module error! Can not add user to secondary group!', userid, new_groupid)
+-            }
+-        end
+-
+-        # remove user from the old secondary groups
+-        if !groups_to_remove.empty?
+-            groups_to_remove.map {|old_groupid|
+-                call_xmlrpc('one.user.delgroup', 'SAML module error! Can not remove user from secondary group!', userid, old_groupid)
+-            }
+-        end
+-    end
+-
+-    # call an xml rpc method
+-    # @param command xml rpc command to call
+-    # @param errormsg error message to log when call fails
+-    # @param xmlrpc_args vararg that contains all the xml rpc method parameters
+-    # @return xml rpc response
+-    def call_xmlrpc(command, errormsg, *xmlrpc_args)
+-        begin
+-            case xmlrpc_args.length
+-            when 0
+-                @server.call(command, @session_string)
+-            when 1
+-                @server.call(command, @session_string, xmlrpc_args[0])
+-            when 2
+-                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1])
+-            when 3
+-                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1], xmlrpc_args[2])
+-            else
+-                @logger.error{'SAML module error! Not supported XMLRPC call!'}
+-            end
+-        rescue Exception => e
+-            @logger.error{errormsg}
+-            [false, e.message]
+-        end
+-    end
+-
+-    # get array of groupnames created from SAML entitlement string
+-    # @param entitlement_str SAML entitlement string
+-    # @return array of groupnames
+-    def get_groups(entitlement_str)
+-        valid_entitlements = Array.new
+-        entitlements = entitlement_str.split(';')
+-        for ent in entitlements
+-            ents = ent.split(':')
+-            if ents[ents.length-2] == @config[:shib_ent_prefix]
+-                valid_entitlements.push(ents.last)
+-            end
+-        end
+-        return valid_entitlements
+-    end
+-
+-    # create random password for new users
+-    # @return random password
+-    def generate_password
+-        return rand(36 ** 20).to_s(36)
+-    end
+-
+-end
+diff -ruN patch/ruby/cloud/CloudAuth.rb one/ruby/cloud/CloudAuth.rb
+--- patch/ruby/cloud/CloudAuth.rb	2014-11-19 10:08:37.521609401 +0100
++++ one/ruby/cloud/CloudAuth.rb	2014-11-19 10:16:40.271202233 +0100
+@@ -21,7 +21,6 @@
+     AUTH_MODULES = {
+         "occi"       => 'OCCICloudAuth',
+         "sunstone"   => 'SunstoneCloudAuth' ,
+-        "shib"       => 'ShibCloudAuth' ,
+         "ec2"        => 'EC2CloudAuth',
+         "x509"       => 'X509CloudAuth',
+         "opennebula" => 'OpenNebulaCloudAuth',
+diff -ruN patch/sunstone/public/js/login_shib.js one/sunstone/public/js/login_shib.js
+--- patch/sunstone/public/js/login_shib.js	2014-11-19 10:08:34.893580094 +0100
++++ one/sunstone/public/js/login_shib.js	1970-01-01 01:00:00.000000000 +0100
+@@ -1,106 +0,0 @@
+-/* -------------------------------------------------------------------------- */
+-/* Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        */
+-/*                                                                            */
+-/* Licensed under the Apache License, Version 2.0 (the "License"); you may    */
+-/* not use this file except in compliance with the License. You may obtain    */
+-/* a copy of the License at                                                   */
+-/*                                                                            */
+-/* http://www.apache.org/licenses/LICENSE-2.0                                 */
+-/*                                                                            */
+-/* Unless required by applicable law or agreed to in writing, software        */
+-/* distributed under the License is distributed on an "AS IS" BASIS,          */
+-/* WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.   */
+-/* See the License for the specific language governing permissions and        */
+-/* limitations under the License.                                             */
+-/* -------------------------------------------------------------------------- */
+-
+-function auth_success(req, response){
+-    window.location.href = ".";
+-}
+-
+-function auth_error(req, error){
+-
+-    var status = error.error.http_status;
+-
+-    switch (status){
+-    case 401:
+-        $("#error_message").text("Invalid username or password");
+-        break;
+-    case 500:
+-        $("#error_message").text("OpenNebula is not running or there was a server exception. Please check the server logs.");
+-        break;
+-    case 0:
+-        $("#error_message").text("No answer from server. Is it running?");
+-        break;
+-    default:
+-        $("#error_message").text("Unexpected error. Status "+status+". Check the server logs.");
+-    };
+-    $("#error_box").fadeIn("slow");
+-    $("#login_spinner").hide();
+-}
+-
+-function authenticate(){
+-    var username = '';
+-    var password = '';
+-    var remember = true;
+-
+-    $("#error_box").fadeOut("slow");
+-    $("#login_spinner").show();
+-
+-    OpenNebula.Auth.login({ data: {username: username
+-                                    , password: password}
+-                            , remember: remember
+-                            , success: auth_success
+-                            , error: auth_error
+-                        });
+-}
+-
+-function getInternetExplorerVersion(){
+-// Returns the version of Internet Explorer or a -1
+-// (indicating the use of another browser).
+-    var rv = -1; // Return value assumes failure.
+-    if (navigator.appName == 'Microsoft Internet Explorer')
+-    {
+-        var ua = navigator.userAgent;
+-        var re  = new RegExp("MSIE ([0-9]{1,}[\.0-9]{0,})");
+-        if (re.exec(ua) != null)
+-            rv = parseFloat( RegExp.$1 );
+-    }
+-    return rv;
+-}
+-
+-function checkVersion(){
+-    var ver = getInternetExplorerVersion();
+-
+-    if ( ver > -1 ){
+-        msg = ver <= 7.0 ? "You are using an old version of IE. \
+-Please upgrade or use Firefox or Chrome for full compatibility." :
+-        "OpenNebula Sunstone is best seen with Chrome or Firefox";
+-        $("#error_box").text(msg);
+-        $("#error_box").fadeIn('slow');
+-    }
+-}
+-
+-$(document).ready(function(){
+-
+-    var pathname = $(location).attr('href');
+-    $.ajax({
+-       type: 'GET',
+-       url: pathname,
+-       complete: function(XMLHttpRequest,textStatus){
+-            authenticate();
+-            return false;
+-       }
+-    });
+-
+-    //compact login elements according to screen height
+-    if (screen.height <= 600){
+-        $('div#logo_sunstone').css("top","15px");
+-        $('div#login').css("top","10px");
+-        $('.error_message').css("top","10px");
+-    };
+-
+-    $("#login_spinner").hide();
+-
+-    checkVersion();
+-});
+diff -ruN patch/sunstone/public/js/plugins/provision-tab.js one/sunstone/public/js/plugins/provision-tab.js
+--- patch/sunstone/public/js/plugins/provision-tab.js	2014-11-19 10:08:34.693577865 +0100
++++ one/sunstone/public/js/plugins/provision-tab.js	2014-11-19 10:16:37.795172747 +0100
+@@ -5692,13 +5692,10 @@
+     showTab('provision-tab');
+ 
+     $("#provision_logout").click(function(){
+-        if ($.cookie("shib_logoutpage")==undefined)
+-            redirect = function(){window.location.href = "login";};
+-        else {
+-            redirect = function(){window.location.href = $.cookie("shib_logoutpage");
+-        }};
+         OpenNebula.Auth.logout({
+-          success:redirect
++          success: function(){
++            window.location.href = "login";
++          }
+         });
+ 
+         return false;
+diff -ruN patch/sunstone/public/js/sunstone.js one/sunstone/public/js/sunstone.js
+--- patch/sunstone/public/js/sunstone.js	2014-11-19 10:08:34.577576571 +0100
++++ one/sunstone/public/js/sunstone.js	2014-11-19 10:16:37.371167697 +0100
+@@ -499,16 +499,15 @@
+     $(document).foundation();
+ 
+     $("a.logout", $(".user-zone-info ")).click(function(){
+-        if ($.cookie("shib_logoutpage")==undefined)
+-            redirect = function(){window.location.href = "login";};
+-        else {
+-            redirect = function(){window.location.href = $.cookie("shib_logoutpage");
+-        }};
+         OpenNebula.Auth.logout({
+-          success:redirect
+-        });
+-         return false;
++          success: function(){
++            window.location.href = "login";
++          },
++          error: onError
+         });
++
++        return false;
++    });
+ }
+ 
+ //returns whether we are Sunstone, or other
+diff -ruN patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js one/sunstone/public/vendor/jQueryCookie/jquery-cookie.js
+--- patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js	2014-11-19 10:08:36.161594234 +0100
++++ one/sunstone/public/vendor/jQueryCookie/jquery-cookie.js	1970-01-01 01:00:00.000000000 +0100
+@@ -1,62 +0,0 @@
+-/*jshint eqnull:true */
+-/*!
+- * jQuery Cookie Plugin v1.1
+- * https://github.com/carhartl/jquery-cookie
+- *
+- * Copyright 2011, Klaus Hartl
+- * Dual licensed under the MIT or GPL Version 2 licenses.
+- * http://www.opensource.org/licenses/mit-license.php
+- * http://www.opensource.org/licenses/GPL-2.0
+- */
+-(function($, document) {
+-
+-	var pluses = /\+/g;
+-	function raw(s) {
+-		return s;
+-	}
+-	function decoded(s) {
+-		return decodeURIComponent(s.replace(pluses, ' '));
+-	}
+-
+-	$.cookie = function(key, value, options) {
+-
+-		// key and at least value given, set cookie...
+-		if (arguments.length > 1 && (!/Object/.test(Object.prototype.toString.call(value)) || value == null)) {
+-			options = $.extend({}, $.cookie.defaults, options);
+-
+-			if (value == null) {
+-				options.expires = -1;
+-			}
+-
+-			if (typeof options.expires === 'number') {
+-				var days = options.expires, t = options.expires = new Date();
+-				t.setDate(t.getDate() + days);
+-			}
+-
+-			value = String(value);
+-
+-			return (document.cookie = [
+-				encodeURIComponent(key), '=', options.raw ? value : encodeURIComponent(value),
+-				options.expires ? '; expires=' + options.expires.toUTCString() : '', // use expires attribute, max-age is not supported by IE
+-				options.path    ? '; path=' + options.path : '',
+-				options.domain  ? '; domain=' + options.domain : '',
+-				options.secure  ? '; secure' : ''
+-			].join(''));
+-		}
+-
+-		// key and possibly options given, get cookie...
+-		options = value || $.cookie.defaults || {};
+-		var decode = options.raw ? raw : decoded;
+-		var cookies = document.cookie.split('; ');
+-		for (var i = 0, parts; (parts = cookies[i] && cookies[i].split('=')); i++) {
+-			if (decode(parts.shift()) === key) {
+-				return decode(parts.join('='));
+-			}
+-		}
+-		return null;
+-	};
+-
+-	$.cookie.defaults = {};
+-
+-})(jQuery, document);
+-
+diff -ruN patch/sunstone/sunstone-server.rb one/sunstone/sunstone-server.rb
+--- patch/sunstone/sunstone-server.rb	2014-11-19 10:08:34.433574966 +0100
++++ one/sunstone/sunstone-server.rb	2014-11-19 10:16:35.323143305 +0100
+@@ -168,11 +168,6 @@
+ 
+     def build_session
+         begin
+-            if $conf[:auth] == 'shib'
+-                params['shib_username'] = request.env[$conf[:shib_username]]
+-                params['shib_entitlement'] = request.env[$conf[:shib_entitlement]]
+-                response.set_cookie('shib_logoutpage',$conf[:shib_logoutpage])
+-            end
+             result = $cloud_auth.auth(request.env, params)
+         rescue Exception => e
+             logger.error { e.message }
+diff -ruN patch/sunstone/views/login.erb one/sunstone/views/login.erb
+--- patch/sunstone/views/login.erb	2014-11-19 10:08:34.317573672 +0100
++++ one/sunstone/views/login.erb	2014-11-19 10:16:35.227142162 +0100
+@@ -11,11 +11,7 @@
+     <![endif]-->
+ 
+     <script type="text/javascript" src="js/opennebula.js"></script>
+-    <% if settings.config[:auth] == "shib" %>
+-        <script type="text/javascript" src="js/login_shib.js"></script>
+-    <% else %>
+-        <script type="text/javascript" src="js/login.js"></script>
+-    <% end %>
++    <script type="text/javascript" src="js/login.js"></script>
+ 
+ </head>
+ 
+@@ -24,15 +20,13 @@
+ 
+ <% if settings.config[:auth] == "x509" %>
+   <%= erb :_login_x509 %>
+-<% elsif settings.config[:auth] == "shib" %>
+-  <%= erb :_login_shib %>
+ <% else %>
+   <%= erb :_login_standard %>
+ <% end %>
+ 
+ 
+ <div id="footer" style="overflow:visible;">
+-    <a href="http://opennebula.org" target="_blank">OpenNebula 4.10.0</a> by <a href="http://c12g.com" target="_blank">C12G Labs</a>.
++    <a href="http://opennebula.org" target="_blank">OpenNebula 4.10.0</a> by <a href="http://opennebula.systems" target="_blank">OpenNebula Systems</a>.
+ </div>
+ </body>
+ </html>
+diff -ruN patch/sunstone/views/_login_shib.erb one/sunstone/views/_login_shib.erb
+--- patch/sunstone/views/_login_shib.erb	2014-11-19 10:08:34.373574297 +0100
++++ one/sunstone/views/_login_shib.erb	1970-01-01 01:00:00.000000000 +0100
+@@ -1,11 +0,0 @@
+-<div id="wrapper">
+-      <div id="logo_sunstone" style="
+-    background: url(<%=$views_config.logo%>) no-repeat center;
+-    background-size: 355px;">
+-      </div>
+-
+-    <div id="error_box" class="hidden alert-box alert" style="display: none">
+-      <span id="error_message"></span>
+-    </div>
+-
+-</div>
