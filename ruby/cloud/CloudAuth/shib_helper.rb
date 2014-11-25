@@ -1,4 +1,4 @@
-# -------------------------------------------------------------------------- #
+	# -------------------------------------------------------------------------- #
 # Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        #
 #                                                                            #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may    #
@@ -13,6 +13,9 @@
 # See the License for the specific language governing permissions and        #
 # limitations under the License.                                             #
 #--------------------------------------------------------------------------- #
+require 'opennebula'
+
+include OpenNebula
 
 # Helper class to call methods in ShibCloudAuth module
 class Shib_Helper
@@ -21,25 +24,39 @@ class Shib_Helper
     def initialize(config, logger)
         @config = config
         @logger = logger
-        
-        one_xmlrpc = @config[:one_xmlrpc]
 
-        @server = XMLRPC::Client.new2(one_xmlrpc)
+        one_xmlrpc = @config[:one_xmlrpc]
         @session_string = @config[:one_auth_username] + ':' + @config[:one_auth_passwd]
-    end 
+    	@client = Client.new(@session_string, one_xmlrpc)
+    end
 
     # creating new user
     # @param username username of user to be created
     def create_user(username)
-        call_xmlrpc('one.user.allocate', 'SAML module error! Can not create new user!', username, generate_password, '')[1]
+    	@logger.debug("Creating user with name: #{username}...")
+    	userobject = OpenNebula::User.new(OpenNebula::User.build_xml,@client)
+    	userobject.allocate(username,generate_password)
+    	if OpenNebula.is_error?(userobject)
+    		@logger.error("Error occured while creating user: #{userobject.message}")
+    		return nil
+    	else
+    		@logger.debug("User with name: #{username} and with ID: #{userobject.id}, created.")
+    		return userobject.id
+    	end
+
     end
 
     # create groups if they do not exists
     # @param groupnames groupnames to be created
     def create_groups(groupnames)
-        groupnames.map {|groupname|
-            if get_groupid(groupname).empty?
-                call_xmlrpc('one.group.allocate', 'SAML module error! Can not create new group!', groupname)
+        groupnames.map {|groupname| @logger.debug("Checking #{groupname} for existence...")
+        if get_groupid(groupname) == nil
+				@logger.debug("Looks like #{groupname} is empty, therefore creating it")
+				groupobject = OpenNebula::Group.new(OpenNebula::Group.build_xml,@client)
+				groupobject.allocate(groupname)
+				if OpenNebula.is_error?(groupobject)
+    				@logger.error("Error occured while creating group: #{groupobject.message}")
+    		    end
             end
         }
     end
@@ -48,81 +65,87 @@ class Shib_Helper
     # @param username username
     # @return user's ID
     def get_userid(username)
-        response = call_xmlrpc('one.userpool.info', 'SAML module error! Can not get userpool info!')
-        xml = Nokogiri::XML(response[1])
-        return xml.xpath('//USER[NAME=\'' + username + '\']/ID').inner_text
+	    @logger.debug("New code is running")
+	    user_pool = OpenNebula::UserPool.new(@client)
+	    rc = user_pool.info
+	    @logger.debug("UserPool: #{user_pool} RC: #{rc}")
+	    if OpenNebula.is_error?(rc)
+	        @logger.error("Error occured while getting the user pool info: #{rc.message}")
+	    end
+	    user_pool.each do |user|
+	        if user.name == username
+				@logger.debug("Returning user id: #{user.id} for username: #{user.name}")
+				return user.id
+	        end
+	    end
+	    return nil
     end
 
     # get group ID of a group
     # @param groupname groupname
     # @return group's ID
     def get_groupid(groupname)
-        response = call_xmlrpc('one.grouppool.info', 'SAML module error! Can not get users group id!')
-        xml = Nokogiri::XML(response[1])
-        return xml.xpath('//GROUP[NAME=\'' + groupname + '\']/ID').inner_text
+    	@logger.debug("Getting group id for group name: #{groupname}")
+	    group_pool = OpenNebula::GroupPool.new(@client)
+	    rc = group_pool.info
+	    @logger.debug("GroupPool: #{group_pool} RC: #{rc}")
+	    if OpenNebula.is_error?(rc)
+	        @logger.error("Error occured while getting the group pool info: #{rc.message}")
+	    end
+	    group_pool.each do |group|
+	        if group.name == groupname
+				@logger.debug("Returning group id: #{group.id} for groupname: #{group.name}")
+				return group.id
+	        end
+	    end
+	    return nil
     end
 
     # handle user's group
     # @param userid user's ID
     # @param groupnames groupnames in which the user belongs
     def handle_groups(userid, groupnames)
+    	user = OpenNebula::User.new(OpenNebula::User.build_xml(userid),@client)
         create_groups(groupnames)
-        new_groupids = groupnames.map {|groupname| get_groupid(groupname).to_i}
-        preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference).to_i}
+        new_groupids = groupnames.map {|groupname| get_groupid(groupname)}
+        preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference)}
 
         # make the first valid group from the preference list primary group of the user
         primary_groupid = (preference_listids & new_groupids).shift
         if primary_groupid.nil?
-            primary_groupid = new_groupids.shift
+            primary_groupid = new_groupids[0]
         end
-        new_groupids.delete(primary_groupid)
-        call_xmlrpc('one.user.chgrp', 'SAML module error! Can not set users primary group!', userid, primary_groupid)
-        
-        userinfo = call_xmlrpc('one.user.info', 'SAML module error! Can not get user info!', userid)[1]
+
+        user.chgrp(primary_groupid)
+
+        userinfo = user.info
         xml = Nokogiri::XML(userinfo)
         old_groupids = xml.xpath('//GROUPS/ID').map {|x| x.inner_text.to_i}
 
         # collect the secondary groups from the user have to be removed or added
         groups_to_remove = (old_groupids - new_groupids)
-        groups_to_add = (new_groupids - old_groupids)
+        groups_to_remove.delete(primary_groupid)
 
+        groups_to_add = (new_groupids - old_groupids)
+        groups_to_add.delete(primary_groupid)
+
+		@logger.debug("Old group ids: #{old_groupids}")
+		@logger.debug("New group ids: #{new_groupids}")
+		@logger.debug("groups to add: #{groups_to_add}")
+		@logger.debug("groups to remove: #{groups_to_remove}")
+        
         # add user to the new secondary groups
         if !groups_to_add.empty?
             groups_to_add.map {|new_groupid|
-                call_xmlrpc('one.user.addgroup', 'SAML module error! Can not add user to secondary group!', userid, new_groupid)
+                user.addgroup(new_groupid)
             }
         end
 
         # remove user from the old secondary groups
         if !groups_to_remove.empty?
             groups_to_remove.map {|old_groupid|
-                call_xmlrpc('one.user.delgroup', 'SAML module error! Can not remove user from secondary group!', userid, old_groupid)
+                user.delgroup(old_groupid)
             }
-        end
-    end
-
-    # call an xml rpc method
-    # @param command xml rpc command to call
-    # @param errormsg error message to log when call fails
-    # @param xmlrpc_args vararg that contains all the xml rpc method parameters
-    # @return xml rpc response
-    def call_xmlrpc(command, errormsg, *xmlrpc_args)
-        begin
-            case xmlrpc_args.length
-            when 0
-                @server.call(command, @session_string)
-            when 1
-                @server.call(command, @session_string, xmlrpc_args[0])
-            when 2
-                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1])
-            when 3
-                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1], xmlrpc_args[2])
-            else
-                @logger.error{'SAML module error! Not supported XMLRPC call!'}
-            end
-        rescue Exception => e
-            @logger.error{errormsg}
-            [false, e.message]
         end
     end
 
