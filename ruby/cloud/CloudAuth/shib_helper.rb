@@ -1,4 +1,4 @@
-	# -------------------------------------------------------------------------- #
+# -------------------------------------------------------------------------- #
 # Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        #
 #                                                                            #
 # Licensed under the Apache License, Version 2.0 (the "License"); you may    #
@@ -35,9 +35,9 @@ class Shib_Helper
     def create_user(username)
     	@logger.debug("Creating user with name: #{username}...")
     	userobject = OpenNebula::User.new(OpenNebula::User.build_xml,@client)
-    	userobject.allocate(username,generate_password)
-    	if OpenNebula.is_error?(userobject)
-    		@logger.error("Error occured while creating user: #{userobject.message}")
+    	rc = userobject.allocate(username,generate_password)
+    	if OpenNebula.is_error?(rc)
+    		@logger.error("Error occured while creating user: #{rc.message}")
     		return nil
     	else
     		@logger.debug("User with name: #{username} and with ID: #{userobject.id}, created.")
@@ -53,9 +53,9 @@ class Shib_Helper
         if get_groupid(groupname) == nil
 				@logger.debug("Looks like #{groupname} is empty, therefore creating it")
 				groupobject = OpenNebula::Group.new(OpenNebula::Group.build_xml,@client)
-				groupobject.allocate(groupname)
-				if OpenNebula.is_error?(groupobject)
-    				@logger.error("Error occured while creating group: #{groupobject.message}")
+				rc = groupobject.allocate(groupname)
+				if OpenNebula.is_error?(rc)
+    				@logger.error("Error occured while creating group: #{rc.message}")
     		    end
             end
         }
@@ -88,7 +88,6 @@ class Shib_Helper
     	@logger.debug("Getting group id for group name: #{groupname}")
 	    group_pool = OpenNebula::GroupPool.new(@client)
 	    rc = group_pool.info
-	    @logger.debug("GroupPool: #{group_pool} RC: #{rc}")
 	    if OpenNebula.is_error?(rc)
 	        @logger.error("Error occured while getting the group pool info: #{rc.message}")
 	    end
@@ -106,6 +105,10 @@ class Shib_Helper
     # @param groupnames groupnames in which the user belongs
     def handle_groups(userid, groupnames)
     	user = OpenNebula::User.new(OpenNebula::User.build_xml(userid),@client)
+    	rc = user.info
+    	if OpenNebula.is_error?(rc)
+    		@logger.error("Error occured while getting userinfo: #{rc.message}")
+    	end
         create_groups(groupnames)
         new_groupids = groupnames.map {|groupname| get_groupid(groupname)}
         preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference)}
@@ -116,16 +119,22 @@ class Shib_Helper
             primary_groupid = new_groupids[0]
         end
 
-        user.chgrp(primary_groupid)
 
-        userinfo = user.info
-        xml = Nokogiri::XML(userinfo)
-        old_groupids = xml.xpath('//GROUPS/ID').map {|x| x.inner_text.to_i}
+        rc = user.chgrp(primary_groupid)
+        if OpenNebula.is_error?(rc)
+        	@logger.error("Error while changing primary group of user: #{rc.message}")
+        	return nil
+        end
+
+        old_groupids = user.groups
+        if old_groupids.nil?
+        	@logger.error("Error while getting group membeships.")
+        	return nil
+        end
 
         # collect the secondary groups from the user have to be removed or added
         groups_to_remove = (old_groupids - new_groupids)
         groups_to_remove.delete(primary_groupid)
-
         groups_to_add = (new_groupids - old_groupids)
         groups_to_add.delete(primary_groupid)
 
@@ -137,14 +146,21 @@ class Shib_Helper
         # add user to the new secondary groups
         if !groups_to_add.empty?
             groups_to_add.map {|new_groupid|
-                user.addgroup(new_groupid)
+                rc = user.addgroup(new_groupid)
+                if OpenNebula.is_error?(rc)
+                	@logger.error("Error while adding user to group: #{rc.message}")
+                end
             }
         end
 
         # remove user from the old secondary groups
         if !groups_to_remove.empty?
             groups_to_remove.map {|old_groupid|
-                user.delgroup(old_groupid)
+                rc = user.delgroup(old_groupid)
+                if OpenNebula.is_error?(rc)
+                	@logger.error("Error while removing user from group: #{rc.message}")
+                	return nil
+                end
             }
         end
     end
