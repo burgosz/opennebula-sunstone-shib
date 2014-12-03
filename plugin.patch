@@ -1,5 +1,5 @@
 diff -ruN patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb one/ruby/cloud/CloudAuth/ShibCloudAuth.rb
---- patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb	2014-11-19 10:08:37.009603691 +0100
+--- patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb	2014-12-03 10:31:26.621826695 +0100
 +++ one/ruby/cloud/CloudAuth/ShibCloudAuth.rb	1970-01-01 01:00:00.000000000 +0100
 @@ -1,93 +0,0 @@
 -# -------------------------------------------------------------------------- #
@@ -96,9 +96,9 @@ diff -ruN patch/ruby/cloud/CloudAuth/ShibCloudAuth.rb one/ruby/cloud/CloudAuth/S
 -    end
 -end
 diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shib_helper.rb
---- patch/ruby/cloud/CloudAuth/shib_helper.rb	2014-11-19 10:08:37.061604271 +0100
+--- patch/ruby/cloud/CloudAuth/shib_helper.rb	2014-12-03 10:31:26.701827722 +0100
 +++ one/ruby/cloud/CloudAuth/shib_helper.rb	1970-01-01 01:00:00.000000000 +0100
-@@ -1,150 +0,0 @@
+@@ -1,189 +0,0 @@
 -# -------------------------------------------------------------------------- #
 -# Copyright 2002-2013, OpenNebula Project (OpenNebula.org), C12G Labs        #
 -#                                                                            #
@@ -114,6 +114,9 @@ diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shi
 -# See the License for the specific language governing permissions and        #
 -# limitations under the License.                                             #
 -#--------------------------------------------------------------------------- #
+-require 'opennebula'
+-
+-include OpenNebula
 -
 -# Helper class to call methods in ShibCloudAuth module
 -class Shib_Helper
@@ -122,25 +125,39 @@ diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shi
 -    def initialize(config, logger)
 -        @config = config
 -        @logger = logger
--        
--        one_xmlrpc = @config[:one_xmlrpc]
 -
--        @server = XMLRPC::Client.new2(one_xmlrpc)
+-        one_xmlrpc = @config[:one_xmlrpc]
 -        @session_string = @config[:one_auth_username] + ':' + @config[:one_auth_passwd]
--    end 
+-    	@client = Client.new(@session_string, one_xmlrpc)
+-    end
 -
 -    # creating new user
 -    # @param username username of user to be created
 -    def create_user(username)
--        call_xmlrpc('one.user.allocate', 'SAML module error! Can not create new user!', username, generate_password, '')[1]
+-    	@logger.debug("Creating user with name: #{username}...")
+-    	userobject = OpenNebula::User.new(OpenNebula::User.build_xml,@client)
+-    	rc = userobject.allocate(username,generate_password)
+-    	if OpenNebula.is_error?(rc)
+-    		@logger.error("Error occured while creating user: #{rc.message}")
+-    		return nil
+-    	else
+-    		@logger.debug("User with name: #{username} and with ID: #{userobject.id}, created.")
+-    		return userobject.id
+-    	end
+-
 -    end
 -
 -    # create groups if they do not exists
 -    # @param groupnames groupnames to be created
 -    def create_groups(groupnames)
--        groupnames.map {|groupname|
--            if get_groupid(groupname).empty?
--                call_xmlrpc('one.group.allocate', 'SAML module error! Can not create new group!', groupname)
+-        groupnames.map {|groupname| @logger.debug("Checking #{groupname} for existence...")
+-        if get_groupid(groupname) == nil
+-				@logger.debug("Looks like #{groupname} is empty, therefore creating it")
+-				groupobject = OpenNebula::Group.new(OpenNebula::Group.build_xml,@client)
+-				rc = groupobject.allocate(groupname)
+-				if OpenNebula.is_error?(rc)
+-    				@logger.error("Error occured while creating group: #{rc.message}")
+-    		    end
 -            end
 -        }
 -    end
@@ -149,81 +166,103 @@ diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shi
 -    # @param username username
 -    # @return user's ID
 -    def get_userid(username)
--        response = call_xmlrpc('one.userpool.info', 'SAML module error! Can not get userpool info!')
--        xml = Nokogiri::XML(response[1])
--        return xml.xpath('//USER[NAME=\'' + username + '\']/ID').inner_text
+-	    @logger.debug("New code is running")
+-	    user_pool = OpenNebula::UserPool.new(@client)
+-	    rc = user_pool.info
+-	    @logger.debug("UserPool: #{user_pool} RC: #{rc}")
+-	    if OpenNebula.is_error?(rc)
+-	        @logger.error("Error occured while getting the user pool info: #{rc.message}")
+-	    end
+-	    user_pool.each do |user|
+-	        if user.name == username
+-				@logger.debug("Returning user id: #{user.id} for username: #{user.name}")
+-				return user.id
+-	        end
+-	    end
+-	    return nil
 -    end
 -
 -    # get group ID of a group
 -    # @param groupname groupname
 -    # @return group's ID
 -    def get_groupid(groupname)
--        response = call_xmlrpc('one.grouppool.info', 'SAML module error! Can not get users group id!')
--        xml = Nokogiri::XML(response[1])
--        return xml.xpath('//GROUP[NAME=\'' + groupname + '\']/ID').inner_text
+-    	@logger.debug("Getting group id for group name: #{groupname}")
+-	    group_pool = OpenNebula::GroupPool.new(@client)
+-	    rc = group_pool.info
+-	    if OpenNebula.is_error?(rc)
+-	        @logger.error("Error occured while getting the group pool info: #{rc.message}")
+-	    end
+-	    group_pool.each do |group|
+-	        if group.name == groupname
+-				@logger.debug("Returning group id: #{group.id} for groupname: #{group.name}")
+-				return group.id
+-	        end
+-	    end
+-	    return nil
 -    end
 -
 -    # handle user's group
 -    # @param userid user's ID
 -    # @param groupnames groupnames in which the user belongs
 -    def handle_groups(userid, groupnames)
+-    	user = OpenNebula::User.new(OpenNebula::User.build_xml(userid),@client)
+-    	rc = user.info
+-    	if OpenNebula.is_error?(rc)
+-    		@logger.error("Error occured while getting userinfo: #{rc.message}")
+-    	end
 -        create_groups(groupnames)
--        new_groupids = groupnames.map {|groupname| get_groupid(groupname).to_i}
--        preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference).to_i}
+-        new_groupids = groupnames.map {|groupname| get_groupid(groupname)}
+-        preference_listids = @config[:shib_entitlement_priority].map {|preference| get_groupid(preference)}
 -
 -        # make the first valid group from the preference list primary group of the user
 -        primary_groupid = (preference_listids & new_groupids).shift
 -        if primary_groupid.nil?
--            primary_groupid = new_groupids.shift
+-            primary_groupid = new_groupids[0]
 -        end
--        new_groupids.delete(primary_groupid)
--        call_xmlrpc('one.user.chgrp', 'SAML module error! Can not set users primary group!', userid, primary_groupid)
--        
--        userinfo = call_xmlrpc('one.user.info', 'SAML module error! Can not get user info!', userid)[1]
--        xml = Nokogiri::XML(userinfo)
--        old_groupids = xml.xpath('//GROUPS/ID').map {|x| x.inner_text.to_i}
+-
+-
+-        rc = user.chgrp(primary_groupid)
+-        if OpenNebula.is_error?(rc)
+-        	@logger.error("Error while changing primary group of user: #{rc.message}")
+-        	return nil
+-        end
+-
+-        old_groupids = user.groups
+-        if old_groupids.nil?
+-        	@logger.error("Error while getting group membeships.")
+-        	return nil
+-        end
 -
 -        # collect the secondary groups from the user have to be removed or added
 -        groups_to_remove = (old_groupids - new_groupids)
+-        groups_to_remove.delete(primary_groupid)
 -        groups_to_add = (new_groupids - old_groupids)
+-        groups_to_add.delete(primary_groupid)
 -
+-		@logger.debug("Old group ids: #{old_groupids}")
+-		@logger.debug("New group ids: #{new_groupids}")
+-		@logger.debug("groups to add: #{groups_to_add}")
+-		@logger.debug("groups to remove: #{groups_to_remove}")
+-        
 -        # add user to the new secondary groups
 -        if !groups_to_add.empty?
 -            groups_to_add.map {|new_groupid|
--                call_xmlrpc('one.user.addgroup', 'SAML module error! Can not add user to secondary group!', userid, new_groupid)
+-                rc = user.addgroup(new_groupid)
+-                if OpenNebula.is_error?(rc)
+-                	@logger.error("Error while adding user to group: #{rc.message}")
+-                end
 -            }
 -        end
 -
 -        # remove user from the old secondary groups
 -        if !groups_to_remove.empty?
 -            groups_to_remove.map {|old_groupid|
--                call_xmlrpc('one.user.delgroup', 'SAML module error! Can not remove user from secondary group!', userid, old_groupid)
+-                rc = user.delgroup(old_groupid)
+-                if OpenNebula.is_error?(rc)
+-                	@logger.error("Error while removing user from group: #{rc.message}")
+-                	return nil
+-                end
 -            }
--        end
--    end
--
--    # call an xml rpc method
--    # @param command xml rpc command to call
--    # @param errormsg error message to log when call fails
--    # @param xmlrpc_args vararg that contains all the xml rpc method parameters
--    # @return xml rpc response
--    def call_xmlrpc(command, errormsg, *xmlrpc_args)
--        begin
--            case xmlrpc_args.length
--            when 0
--                @server.call(command, @session_string)
--            when 1
--                @server.call(command, @session_string, xmlrpc_args[0])
--            when 2
--                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1])
--            when 3
--                @server.call(command, @session_string, xmlrpc_args[0], xmlrpc_args[1], xmlrpc_args[2])
--            else
--                @logger.error{'SAML module error! Not supported XMLRPC call!'}
--            end
--        rescue Exception => e
--            @logger.error{errormsg}
--            [false, e.message]
 -        end
 -    end
 -
@@ -250,18 +289,18 @@ diff -ruN patch/ruby/cloud/CloudAuth/shib_helper.rb one/ruby/cloud/CloudAuth/shi
 -
 -end
 diff -ruN patch/ruby/cloud/CloudAuth.rb one/ruby/cloud/CloudAuth.rb
---- patch/ruby/cloud/CloudAuth.rb	2014-11-19 10:08:37.521609401 +0100
-+++ one/ruby/cloud/CloudAuth.rb	2014-11-19 10:16:40.271202233 +0100
+--- patch/ruby/cloud/CloudAuth.rb	2014-12-03 10:31:27.217834348 +0100
++++ one/ruby/cloud/CloudAuth.rb	2014-12-03 10:35:58.013232251 +0100
 @@ -21,7 +21,6 @@
      AUTH_MODULES = {
          "occi"       => 'OCCICloudAuth',
          "sunstone"   => 'SunstoneCloudAuth' ,
--        "shib"       => 'ShibCloudAuth' ,
+-	"shib"	     => 'ShibCloudAuth',
          "ec2"        => 'EC2CloudAuth',
          "x509"       => 'X509CloudAuth',
          "opennebula" => 'OpenNebulaCloudAuth',
 diff -ruN patch/sunstone/public/js/login_shib.js one/sunstone/public/js/login_shib.js
---- patch/sunstone/public/js/login_shib.js	2014-11-19 10:08:34.893580094 +0100
+--- patch/sunstone/public/js/login_shib.js	2014-12-03 10:31:24.657801468 +0100
 +++ one/sunstone/public/js/login_shib.js	1970-01-01 01:00:00.000000000 +0100
 @@ -1,106 +0,0 @@
 -/* -------------------------------------------------------------------------- */
@@ -371,9 +410,9 @@ diff -ruN patch/sunstone/public/js/login_shib.js one/sunstone/public/js/login_sh
 -    checkVersion();
 -});
 diff -ruN patch/sunstone/public/js/plugins/provision-tab.js one/sunstone/public/js/plugins/provision-tab.js
---- patch/sunstone/public/js/plugins/provision-tab.js	2014-11-19 10:08:34.693577865 +0100
-+++ one/sunstone/public/js/plugins/provision-tab.js	2014-11-19 10:16:37.795172747 +0100
-@@ -5692,13 +5692,10 @@
+--- patch/sunstone/public/js/plugins/provision-tab.js	2014-12-03 10:31:24.433798590 +0100
++++ one/sunstone/public/js/plugins/provision-tab.js	2014-12-03 10:35:55.825202131 +0100
+@@ -5632,13 +5632,10 @@
      showTab('provision-tab');
  
      $("#provision_logout").click(function(){
@@ -391,8 +430,8 @@ diff -ruN patch/sunstone/public/js/plugins/provision-tab.js one/sunstone/public/
  
          return false;
 diff -ruN patch/sunstone/public/js/sunstone.js one/sunstone/public/js/sunstone.js
---- patch/sunstone/public/js/sunstone.js	2014-11-19 10:08:34.577576571 +0100
-+++ one/sunstone/public/js/sunstone.js	2014-11-19 10:16:37.371167697 +0100
+--- patch/sunstone/public/js/sunstone.js	2014-12-03 10:31:24.297796843 +0100
++++ one/sunstone/public/js/sunstone.js	2014-12-03 10:35:55.413196457 +0100
 @@ -499,16 +499,15 @@
      $(document).foundation();
  
@@ -418,7 +457,7 @@ diff -ruN patch/sunstone/public/js/sunstone.js one/sunstone/public/js/sunstone.j
  
  //returns whether we are Sunstone, or other
 diff -ruN patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js one/sunstone/public/vendor/jQueryCookie/jquery-cookie.js
---- patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js	2014-11-19 10:08:36.161594234 +0100
+--- patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js	2014-12-03 10:31:25.809816266 +0100
 +++ one/sunstone/public/vendor/jQueryCookie/jquery-cookie.js	1970-01-01 01:00:00.000000000 +0100
 @@ -1,62 +0,0 @@
 -/*jshint eqnull:true */
@@ -484,13 +523,13 @@ diff -ruN patch/sunstone/public/vendor/jQueryCookie/jquery-cookie.js one/sunston
 -})(jQuery, document);
 -
 diff -ruN patch/sunstone/sunstone-server.rb one/sunstone/sunstone-server.rb
---- patch/sunstone/sunstone-server.rb	2014-11-19 10:08:34.433574966 +0100
-+++ one/sunstone/sunstone-server.rb	2014-11-19 10:16:35.323143305 +0100
+--- patch/sunstone/sunstone-server.rb	2014-12-03 10:31:24.153794993 +0100
++++ one/sunstone/sunstone-server.rb	2014-12-03 10:35:53.389168574 +0100
 @@ -168,11 +168,6 @@
  
      def build_session
          begin
--            if $conf[:auth] == 'shib'
+-	    if $conf[:auth] == 'shib'
 -                params['shib_username'] = request.env[$conf[:shib_username]]
 -                params['shib_entitlement'] = request.env[$conf[:shib_entitlement]]
 -                response.set_cookie('shib_logoutpage',$conf[:shib_logoutpage])
@@ -499,8 +538,8 @@ diff -ruN patch/sunstone/sunstone-server.rb one/sunstone/sunstone-server.rb
          rescue Exception => e
              logger.error { e.message }
 diff -ruN patch/sunstone/views/login.erb one/sunstone/views/login.erb
---- patch/sunstone/views/login.erb	2014-11-19 10:08:34.317573672 +0100
-+++ one/sunstone/views/login.erb	2014-11-19 10:16:35.227142162 +0100
+--- patch/sunstone/views/login.erb	2014-12-03 10:31:24.009793143 +0100
++++ one/sunstone/views/login.erb	2014-12-03 10:35:53.297167305 +0100
 @@ -11,11 +11,7 @@
      <![endif]-->
  
@@ -514,7 +553,7 @@ diff -ruN patch/sunstone/views/login.erb one/sunstone/views/login.erb
  
  </head>
  
-@@ -24,15 +20,13 @@
+@@ -24,8 +20,6 @@
  
  <% if settings.config[:auth] == "x509" %>
    <%= erb :_login_x509 %>
@@ -523,16 +562,8 @@ diff -ruN patch/sunstone/views/login.erb one/sunstone/views/login.erb
  <% else %>
    <%= erb :_login_standard %>
  <% end %>
- 
- 
- <div id="footer" style="overflow:visible;">
--    <a href="http://opennebula.org" target="_blank">OpenNebula 4.10.0</a> by <a href="http://c12g.com" target="_blank">C12G Labs</a>.
-+    <a href="http://opennebula.org" target="_blank">OpenNebula 4.10.0</a> by <a href="http://opennebula.systems" target="_blank">OpenNebula Systems</a>.
- </div>
- </body>
- </html>
 diff -ruN patch/sunstone/views/_login_shib.erb one/sunstone/views/_login_shib.erb
---- patch/sunstone/views/_login_shib.erb	2014-11-19 10:08:34.373574297 +0100
+--- patch/sunstone/views/_login_shib.erb	2014-12-03 10:31:24.089794171 +0100
 +++ one/sunstone/views/_login_shib.erb	1970-01-01 01:00:00.000000000 +0100
 @@ -1,11 +0,0 @@
 -<div id="wrapper">
