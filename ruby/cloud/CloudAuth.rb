@@ -21,7 +21,7 @@ class CloudAuth
     AUTH_MODULES = {
         "occi"       => 'OCCICloudAuth',
         "sunstone"   => 'SunstoneCloudAuth' ,
-        "shib"       => 'ShibCloudAuth' ,
+	"shib"	     => 'ShibCloudAuth',
         "ec2"        => 'EC2CloudAuth',
         "x509"       => 'X509CloudAuth',
         "opennebula" => 'OpenNebulaCloudAuth',

@@ -168,7 +168,7 @@ helpers do
 
     def build_session
         begin
-            if $conf[:auth] == 'shib'
+	    if $conf[:auth] == 'shib'
                 params['shib_username'] = request.env[$conf[:shib_username]]
                 params['shib_entitlement'] = request.env[$conf[:shib_entitlement]]
                 response.set_cookie('shib_logoutpage',$conf[:shib_logoutpage])
